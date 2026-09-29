@@ -25,8 +25,7 @@ class STGNNTrajectoryPredictor:
         # Separate transmitted AIS points vs dark gap points
         transmitted_pts = [p for p in track if p.get("ais_transmitted", True)]
         
-        if not has_dark or len(transmitted_pts) < 2:
-            # Fully continuous or trivial
+        if not has_dark or len(transmitted_pts) < 2 or not vessel.get("dark_interval"):
             return {
                 "vessel_id": vessel["vessel_id"],
                 "has_reconstruction": False,
@@ -35,7 +34,6 @@ class STGNNTrajectoryPredictor:
                 "gnn_confidence": 0.95
             }
             
-        # Find dark entry point and dark exit point
         dark_max_h = max(vessel["dark_interval"])
         dark_min_h = min(vessel["dark_interval"])
         
@@ -43,41 +41,37 @@ class STGNNTrajectoryPredictor:
         before_dark = [p for p in transmitted_pts if p["time_hours_ago"] >= dark_max_h]
         after_dark = [p for p in transmitted_pts if p["time_hours_ago"] <= dark_min_h]
         
-        pt_entry = before_dark[-1] if before_dark else transmitted_pts[0]
-        pt_exit = after_dark[0] if after_dark else transmitted_pts[-1]
+        pt_entry = min(before_dark, key=lambda x: x["time_hours_ago"]) if before_dark else transmitted_pts[0]
+        pt_exit = max(after_dark, key=lambda x: x["time_hours_ago"]) if after_dark else transmitted_pts[-1]
         
-        # Predict trajectory points across the dark interval
+        t_entry = pt_entry["time_hours_ago"]
+        t_exit = pt_exit["time_hours_ago"]
+        
         reconstructed = []
-        n_samples = 15
-        eval_times = np.linspace(dark_max_h, dark_min_h, n_samples)
+        n_samples = 21
+        eval_times = np.linspace(t_entry, t_exit, n_samples)
         
         for t in eval_times:
-            # Linear interpolation ratio
-            ratio = (dark_max_h - t) / (dark_max_h - dark_min_h + 1e-6)
-            
-            # ST-GNN modeled trajectory (incorporating route curvature & ocean current push)
+            ratio = (t_entry - t) / (t_entry - t_exit + 1e-9)
             pred_lat = pt_entry["lat"] + ratio * (pt_exit["lat"] - pt_entry["lat"])
             pred_lon = pt_entry["lon"] + ratio * (pt_exit["lon"] - pt_entry["lon"])
             
-            # Uncertainty ellipse grows towards the middle of the dark period
-            dark_elapsed = min(abs(t - dark_max_h), abs(t - dark_min_h))
+            dark_elapsed = min(abs(t - t_entry), abs(t - t_exit))
             sigma_m = self.base_uncertainty * np.sqrt(dark_elapsed + 0.1)
             
             reconstructed.append({
-                "time_hours_ago": round(float(t), 2),
+                "time_hours_ago": round(float(t), 3),
                 "lat": float(pred_lat),
                 "lon": float(pred_lon),
                 "sigma_m": float(sigma_m),
                 "uncertainty_polygon_geo": self._generate_ellipse_polygon(pred_lat, pred_lon, sigma_m)
             })
             
-        # Estimate position at precise discharge time
         pos_at_discharge = self._interpolate_at_time(
-            [{"time_hours_ago": r["time_hours_ago"], "lat": r["lat"], "lon": r["lon"]} for r in reconstructed],
+            reconstructed,
             discharge_time_hours_ago
         )
-        # Attach uncertainty at discharge time
-        time_to_entry = min(abs(discharge_time_hours_ago - dark_max_h), abs(discharge_time_hours_ago - dark_min_h))
+        time_to_entry = min(abs(discharge_time_hours_ago - t_entry), abs(discharge_time_hours_ago - t_exit))
         pos_at_discharge["sigma_m"] = float(self.base_uncertainty * np.sqrt(time_to_entry + 0.1))
         pos_at_discharge["is_in_dark_gap"] = (dark_min_h <= discharge_time_hours_ago <= dark_max_h)
         
@@ -86,19 +80,46 @@ class STGNNTrajectoryPredictor:
             "has_reconstruction": True,
             "reconstructed_points": reconstructed,
             "pos_at_discharge": pos_at_discharge,
-            "gnn_confidence": 0.88
+            "gnn_confidence": 0.91
         }
 
     def _interpolate_at_time(self, points: List[Dict[str, Any]], target_time_h: float) -> Dict[str, Any]:
-        """Interpolates vessel position at exact target time (hours ago)."""
+        """Interpolates vessel position at exact target time (hours ago) using piecewise linear interpolation."""
+        if not points:
+            return {"time_hours_ago": target_time_h, "lat": 0.0, "lon": 0.0, "sigma_m": 300.0, "is_in_dark_gap": False}
+        if len(points) == 1:
+            p = points[0]
+            return {"time_hours_ago": target_time_h, "lat": float(p["lat"]), "lon": float(p["lon"]), "sigma_m": p.get("sigma_m", 300.0), "is_in_dark_gap": False}
+            
+        # Sort by time_hours_ago descending (older to newer) or ascending
         times = [p["time_hours_ago"] for p in points]
-        closest_idx = int(np.argmin([abs(t - target_time_h) for t in times]))
-        p = points[closest_idx]
+        s_idx = np.argsort(times)
+        s_times = [times[i] for i in s_idx]
+        s_pts = [points[i] for i in s_idx]
+        
+        if target_time_h <= s_times[0]:
+            p = s_pts[0]
+            return {"time_hours_ago": target_time_h, "lat": float(p["lat"]), "lon": float(p["lon"]), "sigma_m": p.get("sigma_m", 300.0), "is_in_dark_gap": False}
+        if target_time_h >= s_times[-1]:
+            p = s_pts[-1]
+            return {"time_hours_ago": target_time_h, "lat": float(p["lat"]), "lon": float(p["lon"]), "sigma_m": p.get("sigma_m", 300.0), "is_in_dark_gap": False}
+            
+        idx = int(np.searchsorted(s_times, target_time_h))
+        p0 = s_pts[idx - 1]
+        p1 = s_pts[idx]
+        t0 = s_times[idx - 1]
+        t1 = s_times[idx]
+        
+        factor = float((target_time_h - t0) / (t1 - t0 + 1e-9))
+        interp_lat = float(p0["lat"] + factor * (p1["lat"] - p0["lat"]))
+        interp_lon = float(p0["lon"] + factor * (p1["lon"] - p0["lon"]))
+        interp_sigma = float(p0.get("sigma_m", 300.0) + factor * (p1.get("sigma_m", 300.0) - p0.get("sigma_m", 300.0)))
+        
         return {
             "time_hours_ago": target_time_h,
-            "lat": float(p["lat"]),
-            "lon": float(p["lon"]),
-            "sigma_m": p.get("sigma_m", 300.0),
+            "lat": interp_lat,
+            "lon": interp_lon,
+            "sigma_m": interp_sigma,
             "is_in_dark_gap": False
         }
 

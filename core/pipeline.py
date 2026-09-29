@@ -76,7 +76,7 @@ class SeaGuardianPipeline:
                 "culprit_dwt": 42000,
                 "culprit_age": 25,
                 "culprit_psc": 6,
-                "dark_duration_h": 3.4,
+                "dark_duration_h": 2.1, "discharge_speed_kn": 2.4, "spatial_offset_km": 0.38,
                 "heading_deg": 190.0,
                 "speed_knots": 13.2,
                 "others": [
@@ -107,7 +107,7 @@ class SeaGuardianPipeline:
                 "culprit_dwt": 54000,
                 "culprit_age": 23,
                 "culprit_psc": 5,
-                "dark_duration_h": 3.8,
+                "dark_duration_h": 2.9, "discharge_speed_kn": 4.5, "spatial_offset_km": 0.52,
                 "heading_deg": 330.0,
                 "speed_knots": 13.6,
                 "others": [
@@ -138,7 +138,7 @@ class SeaGuardianPipeline:
                 "culprit_dwt": 115000,
                 "culprit_age": 22,
                 "culprit_psc": 5,
-                "dark_duration_h": 3.6,
+                "dark_duration_h": 3.8, "discharge_speed_kn": 3.8, "spatial_offset_km": 0.30,
                 "heading_deg": 65.0,
                 "speed_knots": 14.8,
                 "others": [
@@ -169,7 +169,7 @@ class SeaGuardianPipeline:
                 "culprit_dwt": 82000,
                 "culprit_age": 18,
                 "culprit_psc": 4,
-                "dark_duration_h": 3.7,
+                "dark_duration_h": 3.3, "discharge_speed_kn": 2.2, "spatial_offset_km": 0.72,
                 "heading_deg": 30.0,
                 "speed_knots": 14.0,
                 "others": [
@@ -200,7 +200,7 @@ class SeaGuardianPipeline:
                 "culprit_dwt": 105000,
                 "culprit_age": 20,
                 "culprit_psc": 4,
-                "dark_duration_h": 3.8,
+                "dark_duration_h": 4.3, "discharge_speed_kn": 5.2, "spatial_offset_km": 0.25,
                 "heading_deg": 155.0,
                 "speed_knots": 13.8,
                 "others": [
@@ -231,7 +231,7 @@ class SeaGuardianPipeline:
                 "culprit_dwt": 298000,
                 "culprit_age": 19,
                 "culprit_psc": 5,
-                "dark_duration_h": 4.5,
+                "dark_duration_h": 4.8, "discharge_speed_kn": 4.2, "spatial_offset_km": 0.58,
                 "heading_deg": 40.0,
                 "speed_knots": 15.2,
                 "others": [
@@ -262,7 +262,7 @@ class SeaGuardianPipeline:
                 "culprit_dwt": 158000,
                 "culprit_age": 21,
                 "culprit_psc": 5,
-                "dark_duration_h": 5.2,
+                "dark_duration_h": 5.6, "discharge_speed_kn": 3.0, "spatial_offset_km": 0.15,
                 "heading_deg": 115.0,
                 "speed_knots": 14.5,
                 "others": [
@@ -571,27 +571,36 @@ class SeaGuardianPipeline:
         
         # 1. Culprit Vessel
         dark_dur = fleet_cfg.get("dark_duration_h", 3.5)
-        t_dark_start = -(discharge_h + dark_dur * 0.35)
-        t_dark_end = -(discharge_h - dark_dur * 0.65)
+        # Positive hours_ago range:
+        dark_max_h = round(discharge_h + dark_dur * 0.45, 2)
+        dark_min_h = round(max(0.1, discharge_h - dark_dur * 0.55), 2)
         
         cul_heading = np.radians(fleet_cfg.get("heading_deg", 50.0))
         cul_speed_kn = fleet_cfg.get("speed_knots", 14.5)
         deg_per_hour = (cul_speed_kn * 1.852) / 111.0
         
+        # Incident-specific discharge loitering speed
+        discharge_spd_kn = fleet_cfg.get("discharge_speed_kn", 3.8)
+        
         track_cul = []
         for i, t in enumerate(time_steps):
-            is_dark = (t_dark_start <= t <= t_dark_end)
+            t_ago = abs(round(float(t), 2))
+            is_dark = (dark_min_h <= t_ago <= dark_max_h)
             dt_from_discharge = float(t - (-discharge_h))
             
-            lat_p = origin_lat + dt_from_discharge * deg_per_hour * np.cos(cul_heading)
+            # Spatial offset based on incident to give realistic varied spatial overlap (78% to 98%)
+            spatial_offset_km = fleet_cfg.get("spatial_offset_km", 0.35)
+            origin_offset_lat = origin_lat + (spatial_offset_km / 111.0) * np.sin(cul_heading)
+            origin_offset_lon = origin_lon + (spatial_offset_km / 111.0) * np.cos(cul_heading) / max(0.2, np.cos(np.radians(origin_lat)))
+            lat_p = origin_offset_lat + dt_from_discharge * deg_per_hour * np.cos(cul_heading)
             lon_p = origin_lon + dt_from_discharge * deg_per_hour * np.sin(cul_heading) / max(0.2, np.cos(np.radians(origin_lat)))
             
-            spd = 4.2 + float(np.random.normal(0, 0.2)) if is_dark else cul_speed_kn + float(np.random.normal(0, 0.3))
+            spd = discharge_spd_kn + float(np.random.normal(0, 0.15)) if is_dark else cul_speed_kn + float(np.random.normal(0, 0.25))
             track_cul.append({
-                "time_hours_ago": abs(round(float(t), 2)),
+                "time_hours_ago": t_ago,
                 "lat": float(lat_p),
                 "lon": float(lon_p),
-                "speed_knots": round(spd, 1),
+                "speed_knots": round(max(1.5, spd), 1),
                 "heading_deg": round(float(np.degrees(cul_heading)), 1),
                 "ais_transmitted": not is_dark
             })
@@ -609,7 +618,7 @@ class SeaGuardianPipeline:
             "psc_deficiencies_past_3y": fleet_cfg["culprit_psc"],
             "has_dark_gap": True,
             "dark_duration_hours": dark_dur,
-            "dark_interval": (t_dark_start, t_dark_end),
+            "dark_interval": (dark_max_h, dark_min_h),
             "track": track_cul
         })
         
@@ -633,19 +642,20 @@ class SeaGuardianPipeline:
                 
             has_dark = other.get("dark", False)
             dark_d = other.get("dark_dur", 1.5)
-            dark_t_start = -(discharge_h + 3.0)
-            dark_t_end = -(discharge_h + 3.0 - dark_d)
+            other_dark_max_h = round(discharge_h + 3.0, 2)
+            other_dark_min_h = round(max(0.1, discharge_h + 3.0 - dark_d), 2)
             
             track_oth = []
             for t in time_steps:
+                t_ago = abs(round(float(t), 2))
                 dt_from_t0 = float(t)
                 lat_p = t0_lat + dt_from_t0 * d_per_h * np.cos(heading)
                 lon_p = t0_lon + dt_from_t0 * d_per_h * np.sin(heading) / max(0.2, np.cos(np.radians(slick_lat)))
                 
-                pt_dark = has_dark and (dark_t_start <= t <= dark_t_end)
-                spd = speed_kn + float(np.random.normal(0, 0.2))
+                pt_dark = has_dark and (other_dark_min_h <= t_ago <= other_dark_max_h)
+                spd = speed_kn + float(np.random.normal(0, 0.15))
                 track_oth.append({
-                    "time_hours_ago": abs(round(float(t), 2)),
+                    "time_hours_ago": t_ago,
                     "lat": float(lat_p),
                     "lon": float(lon_p),
                     "speed_knots": round(spd, 1),
@@ -666,7 +676,7 @@ class SeaGuardianPipeline:
                 "psc_deficiencies_past_3y": 0,
                 "has_dark_gap": has_dark,
                 "dark_duration_hours": dark_d if has_dark else 0.0,
-                "dark_interval": (dark_t_start, dark_t_end) if has_dark else None,
+                "dark_interval": (other_dark_max_h, other_dark_min_h) if has_dark else None,
                 "track": track_oth
             })
             

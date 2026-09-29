@@ -737,7 +737,11 @@ function renderMap(data) {
     map.flyTo([clat, clon], 9, { duration: 1.2 });
 }
 
+let currentSuspectsList = [];
+let selectedSuspectIndex = 0;
+
 function renderSuspectsList(suspects) {
+    currentSuspectsList = suspects || [];
     const container = document.getElementById('suspects-list');
     if (!container) return;
     container.innerHTML = '';
@@ -748,10 +752,14 @@ function renderSuspectsList(suspects) {
     suspects.forEach((s, i) => {
         const pct = (s.culprit_percentage || 0).toFixed(1);
         const isDark = s.has_dark_gap;
-        const colorClass = i === 0 ? 'border-[#444444] bg-[#242424]' : 'border-[#2c2c2c] bg-[#1a1a1a]';
+        const isSelected = (i === selectedSuspectIndex);
+        const colorClass = isSelected 
+            ? 'border-white bg-[#282828] ring-1 ring-white/40 shadow-lg' 
+            : (i === 0 ? 'border-[#444444] bg-[#202020]' : 'border-[#262626] bg-[#161616]');
         const rankBadge = i === 0 ? 'bg-white text-black' : 'bg-[#333333] text-[#cccccc]';
         const card = document.createElement('div');
-        card.className = 'p-3 rounded-xl border ' + colorClass + ' transition-all hover:border-[#444444]';
+        card.className = 'p-3 rounded-xl border ' + colorClass + ' transition-all hover:border-[#666666] cursor-pointer mb-2';
+        card.onclick = () => selectSuspectCard(i);
         card.innerHTML =
             '<div class="flex items-start justify-between mb-1.5">' +
               '<div>' +
@@ -759,6 +767,7 @@ function renderSuspectsList(suspects) {
                   '<span class="text-[10px] font-bold px-1.5 py-0.5 rounded ' + rankBadge + '">#' + (i+1) + '</span>' +
                   '<span class="text-white font-bold text-[11px]">' + escapeHtml(s.name) + '</span>' +
                   (isDark ? '<span class="text-[9px] px-1.5 py-0.5 rounded bg-[#333333] text-white border border-[#444444] font-bold">DARK GAP</span>' : '') +
+                  (isSelected ? '<span class="text-[9px] px-1.5 py-0.5 rounded bg-white text-black font-bold">RADAR ACTIVE</span>' : '') +
                 '</div>' +
                 '<div class="text-[10px] text-[#888888] mt-0.5">' + escapeHtml(s.vessel_type||'') + ' &bull; ' + escapeHtml(s.flag_state||'') + '</div>' +
               '</div>' +
@@ -775,30 +784,115 @@ function renderSuspectsList(suspects) {
     });
 }
 
-function renderRadarChart(suspects) {
+function selectSuspectCard(idx) {
+    if (!currentSuspectsList || !currentSuspectsList[idx]) return;
+    selectedSuspectIndex = idx;
+    renderSuspectsList(currentSuspectsList);
+    renderRadarChart(currentSuspectsList, idx);
+    
+    // Also pan map to this vessel if possible
+    const s = currentSuspectsList[idx];
+    if (s && s.pos_at_discharge && typeof map !== 'undefined' && map) {
+        const lat = s.pos_at_discharge.lat;
+        const lon = s.pos_at_discharge.lon;
+        if (lat && lon && lat !== 0) {
+            map.panTo([lat, lon], { animate: true, duration: 0.8 });
+        }
+    }
+}
+
+function renderRadarChart(suspects, focusedIndex = 0) {
     const chartEl = document.getElementById('radarChart');
     if (!chartEl) return;
     const ctx = chartEl.getContext('2d');
     if (radarChart) { radarChart.destroy(); radarChart = null; }
     if (!suspects || suspects.length === 0) return;
+    
     const top = suspects[0];
+    const target = suspects[focusedIndex] || top;
+    const isPrime = (focusedIndex === 0);
+    const targetLabel = target.name + (isPrime ? ' (Prime Culprit)' : ' (Selected Suspect)');
+    
+    const datasets = [{
+        label: targetLabel,
+        data: [
+            ((target.s_spatial || 0) * 100).toFixed(1),
+            ((target.s_dark || 0) * 100).toFixed(1),
+            ((target.s_behavior || 0) * 100).toFixed(1),
+            ((target.s_risk || 0) * 100).toFixed(1)
+        ],
+        backgroundColor: isPrime ? 'rgba(255, 255, 255, 0.20)' : 'rgba(255, 255, 255, 0.35)',
+        borderColor: '#ffffff',
+        pointBackgroundColor: '#ffffff',
+        pointBorderColor: '#ffffff',
+        pointRadius: 4,
+        borderWidth: 2
+    }];
+    
+    // Dataset 2: Comparison Baseline
+    if (isPrime && suspects.length > 1) {
+        const innocent = suspects[suspects.length - 1];
+        datasets.push({
+            label: innocent.name + ' (Innocent Baseline)',
+            data: [
+                ((innocent.s_spatial || 0) * 100).toFixed(1),
+                ((innocent.s_dark || 0) * 100).toFixed(1),
+                ((innocent.s_behavior || 0) * 100).toFixed(1),
+                ((innocent.s_risk || 0) * 100).toFixed(1)
+            ],
+            backgroundColor: 'rgba(120, 120, 120, 0.08)',
+            borderColor: '#777777',
+            borderDash: [4, 4],
+            pointBackgroundColor: '#888888',
+            pointBorderColor: '#888888',
+            pointRadius: 3,
+            borderWidth: 1.5
+        });
+    } else if (!isPrime) {
+        datasets.push({
+            label: top.name + ' (Prime Culprit)',
+            data: [
+                ((top.s_spatial || 0) * 100).toFixed(1),
+                ((top.s_dark || 0) * 100).toFixed(1),
+                ((top.s_behavior || 0) * 100).toFixed(1),
+                ((top.s_risk || 0) * 100).toFixed(1)
+            ],
+            backgroundColor: 'rgba(100, 100, 100, 0.05)',
+            borderColor: '#555555',
+            borderDash: [3, 3],
+            pointBackgroundColor: '#666666',
+            pointBorderColor: '#666666',
+            pointRadius: 2.5,
+            borderWidth: 1.2
+        });
+    }
+
     radarChart = new Chart(ctx, {
         type: 'radar',
         data: {
             labels: ['Spatial Intersect (35%)', 'AIS Dark Blackout (30%)', 'Behavior Anomaly (20%)', 'Profile Risk (15%)'],
-            datasets: [{ label: top.name,
-                data: [((top.s_spatial||0)*100).toFixed(1), ((top.s_dark||0)*100).toFixed(1), ((top.s_behavior||0)*100).toFixed(1), ((top.s_risk||0)*100).toFixed(1)],
-                backgroundColor: 'rgba(255, 255, 255, 0.15)', borderColor: '#ffffff',
-                pointBackgroundColor: '#ffffff', pointBorderColor: '#ffffff', pointRadius: 4, borderWidth: 2 }]
+            datasets: datasets
         },
         options: {
-            responsive: true, maintainAspectRatio: false,
-            scales: { r: { min: 0, max: 100,
-                ticks: { color: '#888888', font: { size: 9 }, stepSize: 25, backdropColor: 'transparent' },
-                grid: { color: 'rgba(255, 255, 255, 0.12)' },
-                pointLabels: { color: '#cccccc', font: { size: 9, weight: 'bold' } },
-                angleLines: { color: 'rgba(255, 255, 255, 0.1)' } } },
-            plugins: { legend: { labels: { color: '#ffffff', font: { size: 9 } } } }
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                r: {
+                    min: 0,
+                    max: 100,
+                    ticks: { color: '#888888', font: { size: 9 }, stepSize: 25, backdropColor: 'transparent' },
+                    grid: { color: 'rgba(255, 255, 255, 0.12)' },
+                    pointLabels: { color: '#cccccc', font: { size: 9, weight: 'bold' } },
+                    angleLines: { color: 'rgba(255, 255, 255, 0.1)' }
+                }
+            },
+            plugins: {
+                legend: {
+                    display: true,
+                    position: 'top',
+                    labels: { color: '#e0e0e0', font: { size: 9 }, boxWidth: 12 }
+                }
+            }
         }
     });
 }
